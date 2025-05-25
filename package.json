@@ -1,15 +1,16 @@
 {
-  "name": "proxy-teslatv",
-  "version": "1.0.0",
-  "description": "Proxy pour les flux vidéo de TeslaTV afin de gérer le contenu mixte.",
-  "main": "api/index.js",
-  "scripts": {
-    "start": "node api/index.js"
-  },
-  "dependencies": {
-    "axios": "^1.6.8",  "cors": "^2.8.5",
-    "express": "^5.1.0"
-  },
-  "author": "",
-  "license": "ISC"
+    "name": "proxy-teslatv",
+    "version": "1.0.0",
+    "description": "Proxy pour les flux vidéo de TeslaTV afin de gérer le contenu mixte.",
+    "main": "api/index.js",
+    "scripts": {
+        "start": "node api/index.js"
+    },
+    "dependencies": {
+        "axios": "^1.6.8",
+        "cors": "^2.8.5",
+        "express": "^5.1.0"
+    },
+    "author": "",
+    "license": "ISC"
 }
