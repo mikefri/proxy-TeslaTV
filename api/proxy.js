@@ -28,6 +28,8 @@ export default async function handler(req, res) {
 
   try {
     const isM3U8 = targetUrl.endsWith('.m3u8');
+    // La détermination de isTS est maintenant seulement pour la logique de streaming,
+    // pas pour la réécriture des URLs dans le M3U8 initial
     const isTS = targetUrl.endsWith('.ts');
 
     const fetchOptions = {
@@ -87,6 +89,11 @@ export default async function handler(req, res) {
     if (isM3U8) {
       let m3u8Content = await upstreamResponse.text();
 
+      // L'URL de base réelle pour la résolution des chemins relatifs est maintenant upstreamResponse.url
+      // car c'est l'URL finale après les redirections de la source.
+      // C'EST LA LIGNE CLÉ POUR LA CORRECTION.
+      const baseUrlForRelativePaths = upstreamResponse.url;
+
       // Construit l'URL de base de notre proxy Vercel pour la réécriture
       // Ex: https://ton-projet-vercel.vercel.app/api/proxy
       const proxyBaseUrl = `https://${req.headers.host}${req.url.split('?')[0]}`;
@@ -94,8 +101,8 @@ export default async function handler(req, res) {
       // 1. Réécrit les URLs des segments .ts
       // Ceci va chercher les lignes qui se terminent par .ts (peu importe ce qu'il y a avant)
       m3u8Content = m3u8Content.replace(/^(#EXTINF:.*?)(\s*)([^#\s]+?\.ts)(\s*)$/gm, (match, extinfPart, space1, tsFileName, space2) => {
-          // Résout le chemin relatif du .ts en URL absolue en utilisant l'URL originale du .m3u8 comme base
-          const absoluteTsUrl = new URL(tsFileName.trim(), targetUrl).href;
+          // Utilise baseUrlForRelativePaths pour résoudre le chemin relatif du .ts
+          const absoluteTsUrl = new URL(tsFileName.trim(), baseUrlForRelativePaths).href;
           // Construit la nouvelle URL pour notre proxy, en encodant l'URL absolue du .ts
           const newTsUrl = `${proxyBaseUrl}?url=${encodeURIComponent(absoluteTsUrl)}`;
           return `${extinfPart}${space1}${newTsUrl}${space2}`; // Reconstruit la ligne
@@ -104,14 +111,16 @@ export default async function handler(req, res) {
       // 2. Réécrit les URLs d'autres fichiers .m3u8 (par ex. pour les différentes qualités vidéo)
       // Ceci est crucial pour l'adaptive bitrate streaming (ABR)
       m3u8Content = m3u8Content.replace(/^(#EXT-X-STREAM-INF:.*?)(\s*)([^#\s]+?\.m3u8)(\s*)$/gm, (match, streamInfPart, space1, m3u8FileName, space2) => {
-          const absoluteM3u8Url = new URL(m3u8FileName.trim(), targetUrl).href;
+          // Utilise baseUrlForRelativePaths pour résoudre le chemin relatif du .m3u8
+          const absoluteM3u8Url = new URL(m3u8FileName.trim(), baseUrlForRelativePaths).href;
           const newM3u8Url = `${proxyBaseUrl}?url=${encodeURIComponent(absoluteM3u8Url)}`;
           return `${streamInfPart}${space1}${newM3u8Url}${space2}`;
       });
       
       // 3. Réécrit les URLs des clés de chiffrement si elles existent (pour les flux chiffrés)
       m3u8Content = m3u8Content.replace(/^(#EXT-X-KEY:METHOD=[^,]+,URI=")([^"]+)"(.*?)$/gm, (match, prefix, keyUrl, suffix) => {
-          const absoluteKeyUrl = new URL(keyUrl.trim(), targetUrl).href;
+          // Utilise baseUrlForRelativePaths pour résoudre le chemin relatif de la clé
+          const absoluteKeyUrl = new URL(keyUrl.trim(), baseUrlForRelativePaths).href;
           const newKeyUrl = `${proxyBaseUrl}?url=${encodeURIComponent(absoluteKeyUrl)}`;
           return `${prefix}${newKeyUrl}"${suffix}`;
       });
@@ -119,7 +128,7 @@ export default async function handler(req, res) {
       // Envoie le contenu .m3u8 modifié au client
       res.status(200).send(m3u8Content);
 
-    } else {
+    } else { // Si ce n'est pas un .m3u8 (donc potentiellement un .ts, .key, etc.)
       // Pour les fichiers .ts (ou d'autres comme .key pour le DRM), on les streame directement
       // Cela permet au client de télécharger les segments vidéo et les clés
       upstreamResponse.body.pipe(res);
