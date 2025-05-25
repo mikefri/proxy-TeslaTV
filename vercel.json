@@ -1,17 +1,17 @@
+{
+  "rewrites": [
     {
-      "rewrites": [
-        {
-          "source": "/api",
-          "destination": "/api/index.js"
-        },
-        {
-          "source": "/api/(.*)",
-          "destination": "/api/index.js"
-        }
-      ],
-      "functions": {
-        "api/index.js": {
-          "runtime": "nodejs20.x"  // Utilisez la version de Node.js que Vercel utilise, par exemple "nodejs20.x" ou "nodejs18.x"
-        }
-      }
+      "source": "/api",
+      "destination": "/api/index.js"
+    },
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index.js"
     }
+  ],
+  "functions": {
+    "api/index.js": {
+      "runtime": "nodejs"  // Changé pour utiliser la version Node.js par défaut de Vercel (la plus stable)
+    }
+  }
+}
