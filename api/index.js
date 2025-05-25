@@ -1,58 +1,67 @@
-// api/index.js (Version CONCEPTUELLE pour la transmuxing basique)
-
+// api/index.js
 const fetch = require('node-fetch');
 
 module.exports = async (req, res) => {
-    const { url, segment } = req.query; // 'segment' serait un nouveau paramètre
+    // AJOUTEZ CETTE LIGNE EN PREMIER pour gérer le CORS
+    res.setHeader('Access-Control-Allow-Origin', '*'); // Permet à n'importe quel domaine d'accéder. Pour plus de sécurité, utilisez 'https://mikefri.github.io'
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type, Accept, Range'); // Range est important pour le streaming
+
+    // Gérer les requêtes preflight OPTIONS (requêtes que le navigateur envoie avant la vraie requête)
+    if (req.method === 'OPTIONS') {
+        return res.status(204).end();
+    }
+
+    const { url } = req.query;
 
     if (!url) {
         return res.status(400).send('Missing "url" query parameter.');
     }
 
-    const decodedUrl = decodeURIComponent(url);
-    console.log(`[Proxy Vercel] Requête reçue pour le flux: ${decodedUrl}`);
+    try {
+        const decodedUrl = decodeURIComponent(url);
+        console.log(`[Proxy Vercel] Requête reçue pour le flux: ${decodedUrl}`);
 
-    // LOGIQUE DE TRANSMUXING SIMPLIFIÉE (très expérimentale)
-    // Ceci est un POC, non garanti de fonctionner avec tous les flux ou avec HLS.js sans erreurs.
-    // L'idée est de faire croire à HLS.js qu'il y a un manifeste.
+        const response = await fetch(decodedUrl);
 
-    // Si la requête est pour le manifeste principal (pas de paramètre 'segment')
-    if (!segment) {
-        // Le proxy va générer un manifeste HLS simple
-        res.setHeader('Content-Type', 'application/x-mpegURL'); // Type MIME pour HLS
-        res.status(200).send(`#EXTM3U
-#EXT-X-VERSION:3
-#EXT-X-TARGETDURATION:10
-#EXT-X-MEDIA-SEQUENCE:0
-#EXTINF:10.0,
-${req.protocol}://${req.headers.host}${req.originalUrl}&segment=1 // Pointe vers lui-même avec un paramètre segment
-#EXT-X-ENDLIST`);
-        console.log(`[Proxy Vercel] Manifeste HLS généré pour: ${decodedUrl}`);
-    } else if (segment === '1') {
-        // Si la requête est pour le "segment" (en fait, le flux entier)
-        try {
-            const response = await fetch(decodedUrl);
-
-            if (!response.ok) {
-                console.error(`[Proxy Vercel] Erreur lors de la récupération du flux original (segment): ${response.status} ${response.statusText}`);
-                return res.status(response.status).send(`Failed to fetch original stream: ${response.statusText}`);
-            }
-
-            // Renvoie le flux MPEG-TS direct
-            res.setHeader('Content-Type', 'video/mp2t'); // Type MIME pour MPEG-TS
-            response.headers.forEach((value, name) => {
-                if (!['set-cookie', 'x-powered-by', 'alt-svc', 'transfer-encoding', 'connection', 'content-type'].includes(name.toLowerCase())) {
-                    res.setHeader(name, value);
-                }
-            });
-            console.log(`[Proxy Vercel] Renvoi du flux MPEG-TS pour le "segment": ${decodedUrl}`);
-            response.body.pipe(res);
-
-        } catch (error) {
-            console.error(`[Proxy Vercel] Erreur inattendue lors de la récupération du segment: ${error.message}`);
-            res.status(500).send(`Proxy error: ${error.message}`);
+        if (!response.ok) {
+            console.error(`[Proxy Vercel] Erreur lors de la récupération du flux original: ${response.status} ${response.statusText}`);
+            return res.status(response.status).send(`Failed to fetch original stream: ${response.statusText}`);
         }
-    } else {
-        res.status(404).send('Segment not found');
+
+        const contentType = response.headers.get('content-type');
+        console.log(`[Proxy Vercel] Content-Type du flux original: ${contentType}`);
+
+        // Passer d'autres en-têtes utiles de la réponse originale
+        response.headers.forEach((value, name) => {
+            // Filtrer les en-têtes qui ne devraient pas être transférés directement au client
+            // Et ne pas écraser les en-têtes CORS que nous venons de définir
+            if (!['set-cookie', 'x-powered-by', 'alt-svc', 'transfer-encoding', 'connection', 'access-control-allow-origin', 'access-control-allow-methods', 'access-control-allow-headers'].includes(name.toLowerCase())) {
+                res.setHeader(name, value);
+            }
+        });
+
+        // La logique de Content-Type que nous avions avant
+        if (!contentType || (!contentType.includes('application/x-mpegurl') &&
+                            !contentType.includes('application/vnd.apple.mpegurl') &&
+                            !contentType.includes('video/mp2t') &&
+                            !contentType.includes('video/mpeg') &&
+                            !contentType.includes('application/octet-stream'))) {
+            // Si le Content-Type n'est pas directement traitable par HLS.js ou est inconnu,
+            // ou si on pense que c'est un flux brut que HLS.js devrait tenter de lire comme MPEG-TS.
+            // On force le Content-Type à video/mp2t pour HLS.js, qui a un parser pour ça.
+            // C'est une tentative de compatibilité pour les flux bruts.
+            res.setHeader('Content-Type', 'video/mp2t');
+        } else {
+            res.setHeader('Content-Type', contentType); // Garder le Content-Type original si valide
+        }
+
+
+        // Envoyer le corps de la réponse directement
+        response.body.pipe(res);
+
+    } catch (error) {
+        console.error(`[Proxy Vercel] Erreur inattendue: ${error.message}`);
+        res.status(500).send(`Proxy error: ${error.message}`);
     }
 };
