@@ -1,17 +1,16 @@
 {
   "name": "proxy-teslatv",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "Un simple proxy pour les flux vidéo",
+  "main": "api/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node api/index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
   "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^5.1.0",
-    "request": "^2.88.2"
-  }
+    "express": "^5.1.0", // Ou la version que vous utilisez
+    "axios": "^1.x.x", // Assurez-vous que Axios est là
+    "cors": "^2.8.5"
+  },
+  "author": "",
+  "license": "ISC"
 }
