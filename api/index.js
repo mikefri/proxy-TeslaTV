@@ -2,13 +2,13 @@
 // Ce script est le cœur de votre proxy Vercel, utilisant Axios pour plus de robustesse.
 
 const express = require('express');
-const axios = require('axios'); // Nouvelle bibliothèque pour les requêtes HTTP/HTTPS
+const axios = require('axios');
 const cors = require('cors');
 
 const app = express();
 app.use(cors());
 
-// MODIFICATION ICI : La route est maintenant '/api' pour correspondre au chemin d'accès Vercel
+// Route pour le manifeste HLS généré (si l'URL source est un .ts)
 app.get('/api', async (req, res) => {
     const originalStreamUrl = req.query.url;
 
@@ -19,30 +19,49 @@ app.get('/api', async (req, res) => {
 
     console.log(`[Proxy Vercel] Requête reçue pour le flux : ${originalStreamUrl}`);
 
+    // Détecter si l'URL est un segment .ts (ou si elle ne se termine PAS par .m3u8)
+    // C'est une heuristique, à adapter si besoin.
+    const isTsSegment = originalStreamUrl.includes('.ts') || (!originalStreamUrl.includes('.m3u8') && !originalStreamUrl.includes('.mpd'));
+
+    if (isTsSegment) {
+        console.log('[Proxy Vercel] Détecté comme un segment direct. Génération d\'un manifeste HLS.');
+
+        // Générer un manifeste HLS simple qui pointe vers l'URL du segment
+        // L'URL du segment doit être celle passée au proxy, donc le proxy va le re-proxifier
+        const manifest = `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:10
+#EXT-X-MEDIA-SEQUENCE:0
+#EXTINF:10.0,
+${originalStreamUrl}
+#EXT-X-ENDLIST`;
+
+        res.setHeader('Content-Type', 'application/x-mpegURL'); // Type de contenu pour les manifestes HLS
+        res.status(200).send(manifest);
+        console.log('[Proxy Vercel] Manifeste HLS simple généré et envoyé.');
+        return;
+    }
+
+    // Si ce n'est pas un .ts direct, procéder comme avant pour proxifier le flux
     try {
-        // Faire la requête au flux original en utilisant Axios
         const response = await axios({
             method: 'GET',
             url: originalStreamUrl,
-            responseType: 'stream', // Important pour gérer les flux binaires
+            responseType: 'stream',
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36',
-                'Referer': originalStreamUrl, // Peut être utile pour certains serveurs
-                'Accept': '*/*' // Accepter tous les types de contenu
+                'Referer': originalStreamUrl,
+                'Accept': '*/*'
             }
         });
 
-        // Transférer les en-têtes de la réponse du flux original au client
         for (const header in response.headers) {
             if (header !== 'access-control-allow-origin') {
                 res.setHeader(header, response.headers[header]);
             }
         }
 
-        // Transférer le code de statut HTTP
         res.status(response.status);
-
-        // Transmettre le flux de données directement au client
         response.data.pipe(res);
         console.log(`[Proxy Vercel] Flux proxifié avec succès pour : ${originalStreamUrl}`);
 
@@ -62,11 +81,9 @@ app.get('/api', async (req, res) => {
     }
 });
 
-// Pour la racine de l'application Vercel (par exemple, si on accède à https://proxy-tesla-tv.vercel.app/)
-// C'est souvent utile pour avoir un message d'accueil ou de débogage.
+// Route pour la racine de l'application Vercel (utile pour le débogage)
 app.get('/', (req, res) => {
     res.status(200).send('Proxy TeslaTV est opérationnel. Utilisez /api?url= pour proxifier un flux.');
 });
-
 
 module.exports = app;
