@@ -1,14 +1,11 @@
 const fetch = require('node-fetch');
 const https = require('https');
 
-// Crée un agent HTTPS qui ignore les erreurs de certificat SSL/TLS.
-// À utiliser avec PRUDENCE. En production, si possible, évitez rejectUnauthorized: false.
 const httpsAgent = new https.Agent({
-    rejectUnauthorized: false // ATTENTION : Vulnérabilité de sécurité. À utiliser si absolument nécessaire.
+    rejectUnauthorized: false
 });
 
 module.exports = async (req, res) => {
-    // --- Gestion des en-têtes CORS pour le client appelant le proxy ---
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, PUT, POST, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type, Accept, Range, Authorization');
@@ -17,7 +14,6 @@ module.exports = async (req, res) => {
     if (req.method === 'OPTIONS') {
         return res.status(204).end();
     }
-    // --- Fin de la gestion CORS ---
 
     const { url } = req.query;
 
@@ -33,11 +29,9 @@ module.exports = async (req, res) => {
 
         const useHttpsAgent = decodedUrl.startsWith('https://');
 
-        // --- Configuration des en-têtes pour la requête sortante vers le serveur de streaming ---
         const requestHeaders = {};
         requestHeaders['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-        requestHeaders['Referer'] = 'https://tesla-tv-proxy.vercel.app/'; // Mettez l'URL de votre frontend ou proxy si nécessaire.
-
+        requestHeaders['Referer'] = 'https://tesla-tv-proxy.vercel.app/'; // N'oubliez pas d'ajuster si nécessaire
         if (req.headers['accept']) requestHeaders['Accept'] = req.headers['accept'];
         if (req.headers['accept-language']) requestHeaders['Accept-language'] = req.headers['accept-language'];
         if (req.headers['range']) requestHeaders['Range'] = req.headers['range'];
@@ -46,7 +40,6 @@ module.exports = async (req, res) => {
         requestHeaders['Host'] = new URL(decodedUrl).host;
         requestHeaders['Accept-Encoding'] = 'identity';
         requestHeaders['Connection'] = 'keep-alive';
-        // --- Fin de la configuration des en-têtes ---
 
         const response = await fetch(decodedUrl, {
             method: req.method,
@@ -59,7 +52,6 @@ module.exports = async (req, res) => {
             return res.status(response.status).send(`Failed to fetch original stream: ${response.statusText}`);
         }
 
-        // --- Transfert des en-têtes de la réponse originale au client ---
         const headersToExclude = [
             'set-cookie', 'x-powered-by', 'alt-svc', 'transfer-encoding', 'connection',
             'access-control-allow-origin', 'access-control-allow-methods', 'access-control-allow-headers',
@@ -71,7 +63,6 @@ module.exports = async (req, res) => {
                 res.setHeader(name, value);
             }
         });
-        // --- Fin du transfert des en-têtes ---
 
         const contentType = response.headers.get('content-type');
         console.log(`[Proxy Vercel] Content-Type du flux original: ${contentType}`);
@@ -87,20 +78,20 @@ module.exports = async (req, res) => {
             const m3u8Content = await response.text();
             let modifiedM3u8Content = m3u8Content;
 
-            // Détermine l'URL de base pour résoudre les chemins relatifs dans le manifeste.
+            // Détermine l'URL de base pour résoudre les chemins relatifs.
             // S'assure que l'originalBaseUrl se termine toujours par un '/' pour la résolution des chemins.
             const originalBaseUrl = new URL(decodedUrl).protocol + '//' + new URL(decodedUrl).host + new URL(decodedUrl).pathname.substring(0, new URL(decodedUrl).pathname.lastIndexOf('/') + 1);
 
-            // Regex améliorée pour cibler les URLs.
+            // Regex améliorée pour cibler les URLs dans les deux formats de manifestes.
             // Elle cherche une URL qui:
             // 1. Est le contenu d'une ligne seule (segments, clés, etc.)
             // 2. Est précédée par une directive comme #EXT-X-STREAM-INF:URI= ou #EXT-X-MEDIA:URI=
-            // 3. Est précédée par un #EXTINF: et suivie par une virgule (pour les segments vidéo)
+            // 3. Est précédée par un #EXTINF: et suivie par une virgule (pour les segments vidéo/audio)
             modifiedM3u8Content = modifiedM3u8Content.replace(
                 /(^|\n)([^#\n]+?)(?=\s|$)|(URI=")([^"]+?)(")|(#EXTINF:[^,\n]+,\s*)([^\n]+)/g,
                 (match, p1, p2_standalone, p3_uri_prefix, p4_uri_path, p5_uri_suffix, p6_extinf_prefix, p7_extinf_path) => {
                     let originalPath = '';
-                    if (p2_standalone) { // Cas 1: URL autonome sur une ligne
+                    if (p2_standalone) { // Cas 1: URL autonome sur une ligne (ex: ../segment.mp4)
                         originalPath = p2_standalone.trim();
                     } else if (p4_uri_path) { // Cas 2: URI dans une directive (URI="...")
                         originalPath = p4_uri_path.trim();
@@ -108,7 +99,8 @@ module.exports = async (req, res) => {
                         originalPath = p7_extinf_path.trim();
                     }
 
-                    // Si le chemin est vide, un commentaire HLS, ou déjà une URL de proxy, ou une URL absolue externe, le laisser tel quel.
+                    // Si le chemin est vide, un commentaire HLS, ou déjà une URL de proxy, ou une URL "data:", le laisser tel quel.
+                    // La vérification !originalPath.match(/^(https?:\/\/|data:)/) est cruciale pour ne pas retoucher les URLs absolues déjà présentes.
                     if (!originalPath || originalPath.startsWith('#') || originalPath.startsWith('/api?url=') || originalPath.match(/^(https?:\/\/|data:)/)) {
                         return match;
                     }
@@ -121,6 +113,13 @@ module.exports = async (req, res) => {
                     } catch (e) {
                         console.error("[Proxy Vercel] Erreur de construction d'URL absolue:", e.message, "pour chemin:", originalPath);
                         absoluteOriginalUrl = originalPath; // Fallback au cas où l'URL ne peut pas être absolutisée
+                    }
+                    
+                    // Si l'URL originale était déjà absolue et n'a pas été capturée par la condition ci-dessus
+                    // (ce qui ne devrait pas arriver avec la regex actuelle, mais par sécurité)
+                    // Il faut s'assurer de ne pas double-proxy.
+                    if (absoluteOriginalUrl.startsWith(req.headers.host) && absoluteOriginalUrl.includes('/api?url=')) {
+                        return match; // C'est déjà une URL proxyfiée, on ne la touche pas.
                     }
 
                     const proxifiedUrl = `/api?url=${encodeURIComponent(absoluteOriginalUrl)}`;
