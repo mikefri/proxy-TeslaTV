@@ -77,10 +77,16 @@ module.exports = async (req, res) => {
             (contentType.includes('application/octet-stream') && decodedUrl.endsWith('.m3u8'))
         ));
 
-        // Le manifeste doit être 200 OK pour être traité comme un manifeste HLS complet
+        // --- NOUVEAUX LOGS DE DÉBOGAGE POUR LA CONDITION PRINCIPALE ---
+        console.log(`[Proxy Vercel] Débogage condition :`);
+        console.log(`[Proxy Vercel] - isHlsManifestContent: ${isHlsManifestContent} (contentType: ${contentType})`);
+        console.log(`[Proxy Vercel] - response.status: ${response.status}`);
+        console.log(`[Proxy Vercel] - Condition complète (isHlsManifestContent && response.status === 200): ${isHlsManifestContent && response.status === 200}`);
+        // --- FIN NOUVEAUX LOGS DE DÉBOGAGE ---
+
         if (isHlsManifestContent && response.status === 200) {
             console.log('[Proxy Vercel] Manifeste HLS (200 OK) détecté. Lecture du corps pour réécriture...');
-            const m3u8Content = await response.text(); // Lire le corps ici, sans condition
+            const m3u8Content = await response.text();
             let modifiedM3u8Content = m3u8Content;
 
             const originalUrlObj = new URL(decodedUrl);
@@ -138,9 +144,6 @@ module.exports = async (req, res) => {
             console.log('[Proxy Vercel] Manifeste réécrit (extrait):\n' + modifiedM3u8Content.substring(0, 500) + '...');
 
         } else {
-            // Si ce n'est PAS un manifeste HLS complet (ex: segment, 206 partiel, ou autre Content-Type)
-            // Ou si le statut n'est pas 200 OK (ex: 403, 404, etc.)
-            // Nous ne lisons pas le corps ici si le statut n'est pas bon, car response.body.pipe(res) est plus efficace.
             if (contentType) {
                 res.setHeader('Content-Type', contentType);
             } else if (decodedUrl.endsWith('.ts')) {
@@ -154,7 +157,6 @@ module.exports = async (req, res) => {
             } else if (decodedUrl.endsWith('.key')) {
                  res.setHeader('Content-Type', 'application/octet-stream');
             }
-            // Conserver le statut original (par ex. 206 pour les segments ou 403/404 si erreur)
             res.status(response.status);
             response.body.pipe(res);
             console.log('[Proxy Vercel] Contenu non-manifeste ou non-200 OK transféré directement au client.');
