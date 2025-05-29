@@ -3,13 +3,12 @@ const fetch = require('node-fetch'); // Assurez-vous que node-fetch est install�
 
 module.exports = async (req, res) => {
     // --- Gestion des en-têtes CORS pour le client appelant le proxy ---
-    // Ces en-têtes permettent à votre page web front-end (par ex. GitHub Pages) d'appeler ce proxy.
+    // Ces en-têtes permettent à votre page web front-end d'appeler ce proxy.
     res.setHeader('Access-Control-Allow-Origin', '*'); // Permet à n'importe quel domaine d'accéder. Pour plus de sécurité, utilisez 'https://mikefri.github.io' ou le domaine exact de votre site.
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, PUT, POST, DELETE, OPTIONS'); // Ajoutez toutes les méthodes HTTP nécessaires
     res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type, Accept, Range, Authorization'); // Range et Authorization (si vous en utilisez) sont importants pour le streaming et l'authentification.
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type'); // Expose des en-têtes supplémentaires nécessaires au client
 
-    // Gérer les requêtes preflight OPTIONS (requêtes que le navigateur envoie avant la vraie requête GET/POST)
+    // Gérer les requêtes preflight OPTIONS (requêtes que le navigateur envoie avant la vraie requête)
     if (req.method === 'OPTIONS') {
         return res.status(204).end(); // Répondre avec un statut 204 No Content
     }
@@ -46,7 +45,7 @@ module.exports = async (req, res) => {
 
         // Important pour éviter des problèmes de compression double ou de décodage côté client.
         // On demande au serveur cible de ne pas compresser la réponse.
-        requestHeaders['Accept-Encoding'] = 'identity'; // Demande une réponse non compressée
+        requestHeaders['Accept-Encoding'] = 'identity';
 
         // Gérer la connexion pour qu'elle reste ouverte pour le streaming
         requestHeaders['Connection'] = 'keep-alive';
@@ -62,7 +61,7 @@ module.exports = async (req, res) => {
             headers: requestHeaders, // Utiliser les en-têtes que nous avons configurés
             // Optionnel: si vous avez des problèmes de redirection ou de certificats
             // follow: 20, // Nombre max de redirections à suivre (par défaut 20)
-            // timeout: 0, // Pas de timeout (par défaut 0 pour node-fetch) - attention si le flux est très long à démarrer
+            // timeout: 0, // Pas de timeout (par défaut 0 pour node-fetch)
             // compress: false, // Désactiver la décompression automatique si vous voulez gérer cela manuellement
         });
 
@@ -90,44 +89,22 @@ module.exports = async (req, res) => {
 
 
         // --- Gestion spécifique du Content-Type pour le streaming ---
-        const originalContentType = response.headers.get('content-type');
-        console.log(`[Proxy Vercel] Content-Type du flux original: ${originalContentType}`);
+        // Cette logique vise à garantir que le navigateur sache comment interpréter le flux.
+        const contentType = response.headers.get('content-type');
+        console.log(`[Proxy Vercel] Content-Type du flux original: ${contentType}`);
 
-        // Définir les types MIME qui devraient être forcés à 'video/mp2t' (MPEG Transport Stream)
-        // C'est crucial si le serveur de streaming renvoie un type générique comme 'application/octet-stream'.
-        const typesToForceToMp2t = [
-            'application/octet-stream', // C'est le cas problématique que vous avez rencontré avec xTeVe/Synology
-            'binary/octet-stream',
-            // Ajoutez d'autres types génériques si nécessaire
-        ];
-
-        // Définir les types MIME reconnus comme "bons" pour le streaming HLS/TS sans modification
-        const goodStreamTypes = [
-            'application/x-mpegurl',      // Pour les manifestes HLS (.m3u8)
-            'application/vnd.apple.mpegurl', // Autre forme pour les manifestes HLS
-            'video/mp2t',                 // Pour les segments MPEG-TS
-            'video/mpeg',                 // Pour les flux MPEG
-            'video/webm',                 // Pour les vidéos WebM
-            'video/mp4'                   // Pour les vidéos MP4
-        ];
-
-        let finalContentType = originalContentType;
-
-        // Si le type de contenu original est un de ceux que nous voulons forcer
-        if (typesToForceToMp2t.includes(originalContentType)) {
-            finalContentType = 'video/mp2t'; // Forcer spécifiquement à MPEG-TS
-            console.log(`[Proxy Vercel] Forcing Content-Type de '${originalContentType}' à '${finalContentType}'`);
-        } else if (!goodStreamTypes.includes(originalContentType) && originalContentType) {
-            // Si le Content-Type n'est ni un type à forcer, ni un bon type, mais qu'il existe,
-            // on pourrait logguer un avertissement ou décider de le laisser tel quel.
-            // Pour l'instant, nous le laissons tel quel.
-            console.warn(`[Proxy Vercel] Type de contenu inattendu '${originalContentType}', envoi tel quel. Vérification requise.`);
+        // Si le Content-Type n'est pas directement un type MIME reconnu pour HLS ou TS,
+        // on peut tenter de le forcer à 'video/mp2t' pour aider hls.js ou le lecteur natif.
+        // Cela est utile si le serveur de streaming renvoie un 'application/octet-stream' générique par exemple.
+        if (!contentType || (!contentType.includes('application/x-mpegurl') &&
+                            !contentType.includes('application/vnd.apple.mpegurl') &&
+                            !contentType.includes('video/mp2t') &&
+                            !contentType.includes('video/mpeg') &&
+                            !contentType.includes('application/octet-stream'))) {
+            res.setHeader('Content-Type', 'video/mp2t'); // Force au type MPEG-TS
+        } else {
+            res.setHeader('Content-Type', contentType); // Garde le Content-Type original si valide
         }
-        
-        // Appliquer l'en-tête Content-Type final
-        // Utiliser 'video/mp2t' comme fallback ultime si originalContentType est null/vide
-        res.setHeader('Content-Type', finalContentType || 'video/mp2t');
-
         // --- Fin de la gestion Content-Type ---
 
         // Envoyer le corps de la réponse du flux original directement au client.
@@ -135,7 +112,7 @@ module.exports = async (req, res) => {
         response.body.pipe(res);
 
     } catch (error) {
-        // Gérer les erreurs inattendues (problèmes réseau, DNS, erreurs SSL/certificats sur le serveur source, etc.)
+        // Gérer les erreurs inattendues (problèmes réseau, DNS, etc.)
         console.error(`[Proxy Vercel] Erreur inattendue: ${error.message} pour URL: ${decodedUrl}`);
         res.status(500).send(`Proxy error: ${error.message}`);
     }
