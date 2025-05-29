@@ -1,4 +1,3 @@
-// api/index.js
 const fetch = require('node-fetch');
 const https = require('https');
 
@@ -99,7 +98,7 @@ module.exports = async (req, res) => {
         const contentType = response.headers.get('content-type');
         console.log(`[Proxy Vercel] Content-Type du flux original: ${contentType}`);
 
-        // NOUVEAU: Logique de détection améliorée pour les manifestes HLS (.m3u8).
+        // Logique de détection améliorée pour les manifestes HLS (.m3u8).
         // Prend en compte les Content-Type officiels ET 'text/plain' si l'URL se termine par .m3u8.
         const isHlsManifest = (contentType && (
             contentType.includes('application/x-mpegurl') ||
@@ -117,19 +116,27 @@ module.exports = async (req, res) => {
 
             // Réécrit toutes les URLs internes du manifeste pour qu'elles passent par le proxy.
             modifiedM3u8Content = modifiedM3u8Content.replace(
-                // Capture les URLs qui ne commencent ni par # (commentaires), ni par http/https (déjà absolues)
-                // et qui peuvent avoir des extensions communes (ts, m3u8, etc.).
-                /(^|\n)(?!#)(?!http:\/\/)(?!https:\/\/)([^\s,]+(\.(ts|m3u8|aac|mp4|jpg|png|key|mp3|txt))?)/gm,
+                // Nouvelle regex : Capture toute ligne qui n'est pas un commentaire HLS.
+                // (.+?) capture l'URL ou la directive. (?=\s|$) assure que l'on capture jusqu'à un espace ou la fin de ligne.
+                /(^|\n)(?!#)(.+?)(?=\s|$)/g,
                 (match, p1, p2) => {
+                    // Si la ligne est vide, ou une instruction HLS (commence par #EXT),
+                    // ou si l'URL capturée est déjà une URL de proxy, on la laisse telle quelle.
+                    if (!p2 || p2.startsWith('#EXT') || p2.startsWith('/api?url=') || p2.startsWith('http://' + req.headers.host + '/api?url=') || p2.startsWith('https://' + req.headers.host + '/api?url=')) {
+                        return match;
+                    }
+
                     let absoluteOriginalUrl;
                     try {
                         // Tente de construire une URL absolue si le chemin est relatif.
+                        // La méthode URL() gère bien les cas où p2 est déjà une URL absolue.
                         absoluteOriginalUrl = new URL(p2, originalBaseUrl).href;
                     } catch (e) {
-                        // Si la construction échoue, utilise le chemin tel quel (il pourrait être absolu ou un cas particulier).
-                        absoluteOriginalUrl = p2;
+                        console.error("[Proxy Vercel] Erreur de construction d'URL absolue:", e.message, "pour chemin:", p2);
+                        absoluteOriginalUrl = p2; // Fallback au cas où
                     }
                     // Retourne la nouvelle URL pointant vers le proxy, avec l'URL originale encodée.
+                    // On utilise '/api?url=' qui sera résolu par le navigateur par rapport à la base de l'URL du proxy.
                     return `${p1}/api?url=${encodeURIComponent(absoluteOriginalUrl)}`;
                 }
             );
