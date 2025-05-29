@@ -2,10 +2,11 @@ const fetch = require('node-fetch');
 const https = require('https');
 
 const httpsAgent = new https.Agent({
-    rejectUnauthorized: false
+    rejectUnauthorized: false // Conserver pour le débogage, à évaluer pour la production.
 });
 
 module.exports = async (req, res) => {
+    // --- Gestion des en-têtes CORS ---
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, PUT, POST, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type, Accept, Range, Authorization');
@@ -34,24 +35,27 @@ module.exports = async (req, res) => {
 
         const useHttpsAgent = decodedUrl.startsWith('https://');
 
+        // --- Configuration des en-têtes pour la requête sortante vers le serveur de streaming ---
         const requestHeaders = {};
-        requestHeaders['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-        try {
-             const originalUrlParsed = new URL(decodedUrl);
-             requestHeaders['Referer'] = originalUrlParsed.origin + '/';
-        } catch (e) {
-             console.warn(`[Proxy Vercel] Impossible de déterminer le Referer de l'URL originale (${decodedUrl}). Utilisation du Referer par défaut.`);
-             requestHeaders['Referer'] = 'https://tesla-tv-proxy.vercel.app/'; // <<< REMPLACEZ PAR L'URL DE VOTRE PROXY VERCEL
-        }
+        // Tente de ressembler à VLC ou une requête simple, sans Referer explicite
+        requestHeaders['User-Agent'] = 'VLC/3.0.18 LibVLC/3.0.18'; // Simule le User-Agent de VLC
+        // OU, pour ne pas envoyer de User-Agent spécifique, commentez la ligne ci-dessus
+        // OU, pour laisser node-fetch mettre son User-Agent par défaut, n'ajoutez pas cette ligne.
 
+        // NE PAS ENVOYER DE REFERER si VLC n'en envoie pas !
+        // Si VLC n'envoie pas de Referer, tenter d'en envoyer un (même correct) peut être bloqué.
+        // if (req.headers['referer']) requestHeaders['Referer'] = req.headers['referer']; // Option si vous voulez le transfert du Referer client
+        // requestHeaders['Referer'] = ''; // Ou Referer vide
+
+        // Transfert uniquement les en-têtes essentiels pour le streaming
         if (req.headers['accept']) requestHeaders['Accept'] = req.headers['accept'];
-        if (req.headers['accept-language']) requestHeaders['Accept-language'] = req.headers['accept-language'];
-        if (req.headers['range']) requestHeaders['Range'] = req.headers['range'];
-        if (req.headers['authorization']) requestHeaders['Authorization'] = req.headers['authorization'];
+        if (req.headers['range']) requestHeaders['Range'] = req.headers['range']; // Crucial pour le streaming
+        if (req.headers['authorization']) requestHeaders['Authorization'] = req.headers['authorization']; // Pour les flux authentifiés
 
-        requestHeaders['Host'] = new URL(decodedUrl).host;
-        requestHeaders['Accept-Encoding'] = 'identity';
+        // Laissez node-fetch gérer l'en-tête Host par défaut, souvent plus fiable.
+        // requestHeaders['Host'] = new URL(decodedUrl).host; // Commenté car node-fetch le gère souvent bien.
+        requestHeaders['Accept-Encoding'] = 'identity'; // Important pour ne pas avoir de compression inattendue
         requestHeaders['Connection'] = 'keep-alive';
 
         console.log(`[Proxy Vercel] En-têtes envoyés au serveur original:\n${JSON.stringify(requestHeaders, null, 2)}`);
@@ -67,7 +71,7 @@ module.exports = async (req, res) => {
 
         if (!response.ok) {
             const errorBody = await response.text();
-            console.error(`[Proxy Vercel] Erreur lors de la récupération du flux original: ${response.status} ${response.statusText} pour URL: ${decodedUrl}. Corps de l'erreur: ${errorBody.substring(0, 500)}`); // Log plus grand extrait
+            console.error(`[Proxy Vercel] Erreur lors de la récupération du flux original: ${response.status} ${response.statusText} pour URL: ${decodedUrl}. Corps de l'erreur: ${errorBody.substring(0, 500)}`);
             return res.status(response.status).send(`Failed to fetch original stream: ${response.statusText}. Details: ${errorBody.substring(0, 200)}...`);
         }
 
@@ -89,8 +93,8 @@ module.exports = async (req, res) => {
         const isHlsManifest = (contentType && (
             contentType.includes('application/x-mpegurl') ||
             contentType.includes('application/vnd.apple.mpegurl') ||
-            (contentType.includes('text/plain') && decodedUrl.endsWith('.m3u8')) || // Gère les .m3u8 avec text/plain
-            (contentType.includes('application/octet-stream') && decodedUrl.endsWith('.m3u8')) // Gère les .m3u8 avec octet-stream
+            (contentType.includes('text/plain') && decodedUrl.endsWith('.m3u8')) ||
+            (contentType.includes('application/octet-stream') && decodedUrl.endsWith('.m3u8'))
         ));
 
         if (isHlsManifest) {
@@ -101,27 +105,18 @@ module.exports = async (req, res) => {
             const originalBaseUrl = new URL(decodedUrl).protocol + '//' + new URL(decodedUrl).host + new URL(decodedUrl).pathname.substring(0, new URL(decodedUrl).pathname.lastIndexOf('/') + 1);
             console.log(`[Proxy Vercel] Base URL pour résolution relative: ${originalBaseUrl}`);
 
-            // Regex améliorée pour être plus agressive et capturer tout ce qui ressemble à une URL,
-            // y compris après des attributs ou des directives.
-            // Ce regex capture :
-            // 1. Une URL sur une ligne seule (p2_standalone_url)
-            // 2. Le contenu d'un attribut URI="..." (p4_uri_path)
-            // 3. Une URL après une directive #EXTINF: (p7_extinf_path)
-            // 4. Une URL qui pourrait être après un autre attribut (KEYFORMATVERSIONS=1,METHOD=AES-128,URI="...")
-            // On s'assure que la capture de l'URL n'inclut pas de # pour les commentaires.
             modifiedM3u8Content = modifiedM3u8Content.replace(
                 /(?:^|\n)([^#\n]+?\.(?:m3u8|ts|mp4|aac|mp3|key)(?:[?#][^\n]*)?\s*$)|(URI=")([^"]+?)(")|(#EXTINF:[^,\n]+,\s*)([^\n]+)/g,
                 (match, p1_standalone_url, p3_uri_prefix, p4_uri_path, p5_uri_suffix, p6_extinf_prefix, p7_extinf_path) => {
                     let originalPath = '';
-                    if (p1_standalone_url) { // Cas 1: URL autonome sur une ligne (plus précis sur les extensions)
+                    if (p1_standalone_url) {
                         originalPath = p1_standalone_url.trim();
-                    } else if (p4_uri_path) { // Cas 2: URI dans une directive (URI="...")
+                    } else if (p4_uri_path) {
                         originalPath = p4_uri_path.trim();
-                    } else if (p7_extinf_path) { // Cas 3: URL après #EXTINF:
+                    } else if (p7_extinf_path) {
                         originalPath = p7_extinf_path.trim();
                     }
 
-                    // Ignorer les lignes de commentaires ou les URLs déjà proxyfiées/absolues
                     if (!originalPath || originalPath.startsWith('#') || originalPath.startsWith('/api?url=') || originalPath.match(/^(https?:\/\/|data:)/)) {
                         console.log(`[Proxy Vercel]  - URL non modifiée (déjà absolue/proxy/commentaire): '${originalPath || match.substring(0, 50)}...'`);
                         return match;
@@ -144,9 +139,8 @@ module.exports = async (req, res) => {
                     const proxifiedUrl = `/api?url=${encodeURIComponent(absoluteOriginalUrl)}`;
                     console.log(`[Proxy Vercel]  - URL proxyfiée: ${proxifiedUrl}`);
 
-                    // Reconstruire la ligne avec l'URL proxyfiée
                     if (p1_standalone_url) {
-                        return `${proxifiedUrl}`; // Pas de préfixe car c'est une ligne autonome
+                        return `${proxifiedUrl}`;
                     } else if (p4_uri_path) {
                         return `${p3_uri_prefix}${proxifiedUrl}${p5_uri_suffix}`;
                     } else if (p7_extinf_path) {
@@ -159,7 +153,7 @@ module.exports = async (req, res) => {
             res.setHeader('Content-Type', 'application/x-mpegurl');
             res.status(response.status).send(modifiedM3u8Content);
             console.log('[Proxy Vercel] Manifeste HLS réécrit et envoyé au client.');
-            console.log('[Proxy Vercel] Manifeste réécrit (extrait):\n' + modifiedM3u8Content.substring(0, 500) + '...'); // Extrait du manifeste réécrit
+            console.log('[Proxy Vercel] Manifeste réécrit (extrait):\n' + modifiedM3u8Content.substring(0, 500) + '...');
 
         } else {
             if (contentType) {
