@@ -69,19 +69,18 @@ module.exports = async (req, res) => {
         const contentType = response.headers.get('content-type');
         console.log(`[Proxy Vercel] Content-Type du flux original: ${contentType}`);
 
-        // Déterminer si c'est un manifeste HLS ET que le statut est 200 OK
-        const isHlsManifestAndOk = (
-            (contentType && (
-                contentType.includes('application/x-mpegurl') ||
-                contentType.includes('application/vnd.apple.mpegurl') ||
-                (contentType.includes('text/plain') && decodedUrl.endsWith('.m3u8')) ||
-                (contentType.includes('application/octet-stream') && decodedUrl.endsWith('.m3u8'))
-            )) && response.status === 200
-        );
+        // Déterminer si c'est un manifeste HLS (par Content-Type)
+        const isHlsManifestContent = (contentType && (
+            contentType.includes('application/x-mpegurl') ||
+            contentType.includes('application/vnd.apple.mpegurl') ||
+            (contentType.includes('text/plain') && decodedUrl.endsWith('.m3u8')) ||
+            (contentType.includes('application/octet-stream') && decodedUrl.endsWith('.m3u8'))
+        ));
 
-        if (isHlsManifestAndOk) {
-            console.log('[Proxy Vercel] Manifeste HLS (200 OK) détecté. Tentative de réécriture des URLs...');
-            const m3u8Content = await response.text(); // Lire le corps du manifeste
+        // Le manifeste doit être 200 OK pour être traité comme un manifeste HLS complet
+        if (isHlsManifestContent && response.status === 200) {
+            console.log('[Proxy Vercel] Manifeste HLS (200 OK) détecté. Lecture du corps pour réécriture...');
+            const m3u8Content = await response.text(); // Lire le corps ici, sans condition
             let modifiedM3u8Content = m3u8Content;
 
             const originalUrlObj = new URL(decodedUrl);
@@ -140,6 +139,8 @@ module.exports = async (req, res) => {
 
         } else {
             // Si ce n'est PAS un manifeste HLS complet (ex: segment, 206 partiel, ou autre Content-Type)
+            // Ou si le statut n'est pas 200 OK (ex: 403, 404, etc.)
+            // Nous ne lisons pas le corps ici si le statut n'est pas bon, car response.body.pipe(res) est plus efficace.
             if (contentType) {
                 res.setHeader('Content-Type', contentType);
             } else if (decodedUrl.endsWith('.ts')) {
@@ -153,10 +154,10 @@ module.exports = async (req, res) => {
             } else if (decodedUrl.endsWith('.key')) {
                  res.setHeader('Content-Type', 'application/octet-stream');
             }
-
+            // Conserver le statut original (par ex. 206 pour les segments ou 403/404 si erreur)
             res.status(response.status);
             response.body.pipe(res);
-            console.log('[Proxy Vercel] Contenu non-manifeste ou partiel transféré directement au client.');
+            console.log('[Proxy Vercel] Contenu non-manifeste ou non-200 OK transféré directement au client.');
         }
 
     } catch (error) {
