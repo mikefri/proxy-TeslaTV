@@ -42,7 +42,6 @@ module.exports = async (req, res) => {
         if (req.headers['accept-language']) requestHeaders['Accept-language'] = req.headers['accept-language'];
         requestHeaders['Accept-Encoding'] = 'identity';
 
-        // Rendre la détection .m3u8 plus robuste (ignorer les paramètres d'URL)
         const urlPath = new URL(decodedUrl).pathname;
         const endsWithM3u8 = urlPath.toLowerCase().endsWith('.m3u8');
 
@@ -73,28 +72,23 @@ module.exports = async (req, res) => {
         const contentType = response.headers.get('content-type');
         console.log(`[Proxy Vercel] Content-Type du flux original: ${contentType}`);
 
-        // --- NOUVELLE LOGIQUE DE DÉTECTION DU MANIFESTE HLS ---
         let isHlsManifestContent = false;
         if (contentType) {
-            const normalizedContentType = contentType.toLowerCase().trim(); // Normalisation
+            const normalizedContentType = contentType.toLowerCase().trim();
             isHlsManifestContent = (
                 normalizedContentType.includes('application/x-mpegurl') ||
                 normalizedContentType.includes('application/vnd.apple.mpegurl') ||
-                (normalizedContentType.includes('text/plain') && endsWithM3u8) || // Utilise endsWithM3u8 ici
-                (normalizedContentType.includes('application/octet-stream') && endsWithM3u8) // Utilise endsWithM3u8 ici
+                (normalizedContentType.includes('text/plain') && endsWithM3u8) ||
+                (normalizedContentType.includes('application/octet-stream') && endsWithM3u8)
             );
         }
-        // --- FIN NOUVELLE LOGIQUE DE DÉTECTION DU MANIFESTE HLS ---
 
-
-        // --- NOUVEAUX LOGS DE DÉBOGAGE POUR LA CONDITION PRINCIPALE ---
         console.log(`[Proxy Vercel] Débogage condition (après correction) :`);
         console.log(`[Proxy Vercel] - normalizedContentType: ${contentType ? contentType.toLowerCase().trim() : 'null'}`);
         console.log(`[Proxy Vercel] - endsWithM3u8: ${endsWithM3u8}`);
         console.log(`[Proxy Vercel] - isHlsManifestContent: ${isHlsManifestContent}`);
         console.log(`[Proxy Vercel] - response.status: ${response.status}`);
         console.log(`[Proxy Vercel] - Condition complète (isHlsManifestContent && response.status === 200): ${isHlsManifestContent && response.status === 200}`);
-        // --- FIN NOUVEAUX LOGS DE DÉBOGAGE ---
 
         if (isHlsManifestContent && response.status === 200) {
             console.log('[Proxy Vercel] Manifeste HLS (200 OK) détecté. Lecture du corps pour réécriture...');
@@ -105,16 +99,26 @@ module.exports = async (req, res) => {
             const originalBaseUrl = originalUrlObj.protocol + '//' + originalUrlObj.host + originalUrlObj.pathname.substring(0, originalUrlObj.pathname.lastIndexOf('/') + 1);
             console.log(`[Proxy Vercel] Base URL pour résolution relative: ${originalBaseUrl}`);
 
+            // Regex mis à jour pour mieux capturer les URLs standalone en fin de ligne
+            // Capture:
+            // 1. Une URL autonome sur sa propre ligne (groupes 1 et 2)
+            // 2. Une URL dans un attribut URI="..." (groupes 3, 4, 5)
+            // 3. Une URL après #EXTINF: (groupes 6, 7)
             modifiedM3u8Content = modifiedM3u8Content.replace(
-                /(?:^|\n)([^#\n]+?\.(?:m3u8|ts|mp4|aac|mp3|key)(?:[?#][^\n]*)?\s*$)|(URI=")([^"]+?)(")|(#EXTINF:[^,\n]+,\s*)([^\n]+)/g,
-                (match, p1_standalone_url, p3_uri_prefix, p4_uri_path, p5_uri_suffix, p6_extinf_prefix, p7_extinf_path) => {
+                /(^|\n)([^#\n]+?\.(?:m3u8|ts|mp4|aac|mp3|key)(?:[?#][^\n]*)?\s*$)|(URI=")([^"]+?)(")|(#EXTINF:[^,\n]+,\s*)([^\n]+)/g,
+                (match, p1_line_prefix, p2_standalone_url, p3_uri_prefix, p4_uri_path, p5_uri_suffix, p6_extinf_prefix, p7_extinf_path) => {
                     let originalPath = '';
-                    if (p1_standalone_url) {
-                        originalPath = p1_standalone_url.trim();
-                    } else if (p4_uri_path) {
+                    let prefix = ''; // Pour conserver le préfixe de ligne s'il y en a un (e.g. \n)
+
+                    if (p2_standalone_url) { // Cas 1: URL autonome sur sa propre ligne
+                        originalPath = p2_standalone_url.trim();
+                        prefix = p1_line_prefix;
+                    } else if (p4_uri_path) { // Cas 2: URL dans URI="..."
                         originalPath = p4_uri_path.trim();
-                    } else if (p7_extinf_path) {
+                        prefix = p3_uri_prefix;
+                    } else if (p7_extinf_path) { // Cas 3: URL après #EXTINF:
                         originalPath = p7_extinf_path.trim();
+                        prefix = p6_extinf_prefix;
                     }
 
                     if (!originalPath || originalPath.startsWith('#') || originalPath.startsWith('/api?url=') || originalPath.match(/^(https?:\/\/|data:)/)) {
@@ -139,14 +143,15 @@ module.exports = async (req, res) => {
                     const proxifiedUrl = `/api?url=${encodeURIComponent(absoluteOriginalUrl)}`;
                     console.log(`[Proxy Vercel]  - URL proxyfiée: ${proxifiedUrl}`);
 
-                    if (p1_standalone_url) {
-                        return `${proxifiedUrl}`;
-                    } else if (p4_uri_path) {
+                    // Construction du remplacement basée sur le cas de capture
+                    if (p2_standalone_url) { // Cas 1: URL autonome
+                        return `${prefix}${proxifiedUrl}`;
+                    } else if (p4_uri_path) { // Cas 2: URL dans URI="..."
                         return `${p3_uri_prefix}${proxifiedUrl}${p5_uri_suffix}`;
-                    } else if (p7_extinf_path) {
+                    } else if (p7_extinf_path) { // Cas 3: URL après #EXTINF:
                         return `${p6_extinf_prefix}${proxifiedUrl}`;
                     }
-                    return match;
+                    return match; // Ne devrait jamais arriver
                 }
             );
 
@@ -158,6 +163,8 @@ module.exports = async (req, res) => {
         } else {
             if (contentType) {
                 res.setHeader('Content-Type', contentType);
+            } else if (endsWithM3u8) { // Fallback pour les .m3u8 qui ne sont pas 200 OK ou avec un type non standard
+                res.setHeader('Content-Type', 'application/x-mpegurl');
             } else if (decodedUrl.endsWith('.ts')) {
                 res.setHeader('Content-Type', 'video/mp2t');
             } else if (decodedUrl.endsWith('.aac')) {
