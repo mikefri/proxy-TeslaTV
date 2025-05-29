@@ -6,7 +6,6 @@ const httpsAgent = new https.Agent({
 });
 
 module.exports = async (req, res) => {
-    // --- Gestion des en-têtes CORS ---
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, PUT, POST, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type, Accept, Range, Authorization');
@@ -40,20 +39,15 @@ module.exports = async (req, res) => {
 
         if (req.headers['accept']) requestHeaders['Accept'] = req.headers['accept'];
         if (req.headers['authorization']) requestHeaders['Authorization'] = req.headers['authorization'];
-        if (req.headers['accept-language']) requestHeaders['Accept-language'] = req.headers['accept-language']; // Ajouté à nouveau si important
-        // Laissez node-fetch gérer le Host et la connexion par défaut.
+        if (req.headers['accept-language']) requestHeaders['Accept-language'] = req.headers['accept-language'];
         requestHeaders['Accept-Encoding'] = 'identity';
 
-        // --- NOUVELLE LOGIQUE POUR L'EN-TÊTE RANGE ---
-        // N'envoyer l'en-tête Range QUE si l'URL ne se termine PAS par .m3u8 (c'est donc un segment ou autre)
-        // et que le client a bien envoyé un Range.
         if (req.headers['range'] && !decodedUrl.endsWith('.m3u8')) {
             requestHeaders['Range'] = req.headers['range'];
             console.log('[Proxy Vercel] En-tête Range transmis car ce n\'est pas un manifeste HLS.');
         } else if (req.headers['range'] && decodedUrl.endsWith('.m3u8')) {
             console.warn('[Proxy Vercel] En-tête Range ignoré pour un manifeste HLS. Le client ne devrait pas le demander pour le manifeste principal.');
         }
-        // --- FIN NOUVELLE LOGIQUE POUR L'EN-TÊTE RANGE ---
 
         console.log(`[Proxy Vercel] En-têtes envoyés au serveur original:\n${JSON.stringify(requestHeaders, null, 2)}`);
 
@@ -66,39 +60,28 @@ module.exports = async (req, res) => {
         console.log(`[Proxy Vercel] Réponse du serveur original - Statut: ${response.status} ${response.statusText}`);
         console.log(`[Proxy Vercel] Réponse du serveur original - En-têtes:\n${JSON.stringify(Object.fromEntries(response.headers), null, 2)}`);
 
-        if (!response.ok && response.status !== 206) { // Gérer 206 comme une "non-erreur" ici car c'est un flux
+        if (!response.ok && response.status !== 206) {
             const errorBody = await response.text();
             console.error(`[Proxy Vercel] Erreur lors de la récupération du flux original: ${response.status} ${response.statusText} pour URL: ${decodedUrl}. Corps de l'erreur: ${errorBody.substring(0, 500)}`);
             return res.status(response.status).send(`Failed to fetch original stream: ${response.statusText}. Details: ${errorBody.substring(0, 200)}...`);
         }
 
-        const headersToExclude = [
-            'set-cookie', 'x-powered-by', 'alt-svc', 'transfer-encoding', 'connection',
-            'access-control-allow-origin', 'access-control-allow-methods', 'access-control-allow-headers',
-            'content-encoding'
-        ];
-
-        response.headers.forEach((value, name) => {
-            if (!headersToExclude.includes(name.toLowerCase())) {
-                res.setHeader(name, value);
-            }
-        });
-
         const contentType = response.headers.get('content-type');
         console.log(`[Proxy Vercel] Content-Type du flux original: ${contentType}`);
 
-        const isHlsManifest = (contentType && (
-            contentType.includes('application/x-mpegurl') ||
-            contentType.includes('application/vnd.apple.mpegurl') ||
-            (contentType.includes('text/plain') && decodedUrl.endsWith('.m3u8')) ||
-            (contentType.includes('application/octet-stream') && decodedUrl.endsWith('.m3u8'))
-        ));
+        // Déterminer si c'est un manifeste HLS ET que le statut est 200 OK
+        const isHlsManifestAndOk = (
+            (contentType && (
+                contentType.includes('application/x-mpegurl') ||
+                contentType.includes('application/vnd.apple.mpegurl') ||
+                (contentType.includes('text/plain') && decodedUrl.endsWith('.m3u8')) ||
+                (contentType.includes('application/octet-stream') && decodedUrl.endsWith('.m3u8'))
+            )) && response.status === 200
+        );
 
-        // On vérifie aussi le statut HTTP pour un manifeste. Il DOIT être 200 OK.
-        // Si c'est 206, ce n'est pas un manifeste complet même s'il a une extension .m3u8.
-        if (isHlsManifest && response.status === 200) {
+        if (isHlsManifestAndOk) {
             console.log('[Proxy Vercel] Manifeste HLS (200 OK) détecté. Tentative de réécriture des URLs...');
-            const m3u8Content = await response.text();
+            const m3u8Content = await response.text(); // Lire le corps du manifeste
             let modifiedM3u8Content = m3u8Content;
 
             const originalUrlObj = new URL(decodedUrl);
@@ -151,12 +134,12 @@ module.exports = async (req, res) => {
             );
 
             res.setHeader('Content-Type', 'application/x-mpegurl');
-            res.status(200).send(modifiedM3u8Content); // Toujours renvoyer 200 pour le manifeste
+            res.status(200).send(modifiedM3u8Content);
             console.log('[Proxy Vercel] Manifeste HLS réécrit et envoyé au client.');
             console.log('[Proxy Vercel] Manifeste réécrit (extrait):\n' + modifiedM3u8Content.substring(0, 500) + '...');
 
         } else {
-            // Si ce n'est pas un manifeste HLS (ou si c'est un 206 partiel), on transfère directement le corps
+            // Si ce n'est PAS un manifeste HLS complet (ex: segment, 206 partiel, ou autre Content-Type)
             if (contentType) {
                 res.setHeader('Content-Type', contentType);
             } else if (decodedUrl.endsWith('.ts')) {
@@ -171,7 +154,7 @@ module.exports = async (req, res) => {
                  res.setHeader('Content-Type', 'application/octet-stream');
             }
 
-            res.status(response.status); // Garde le statut original (par ex. 206 pour les segments)
+            res.status(response.status);
             response.body.pipe(res);
             console.log('[Proxy Vercel] Contenu non-manifeste ou partiel transféré directement au client.');
         }
