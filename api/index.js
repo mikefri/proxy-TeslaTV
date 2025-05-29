@@ -42,10 +42,14 @@ module.exports = async (req, res) => {
         if (req.headers['accept-language']) requestHeaders['Accept-language'] = req.headers['accept-language'];
         requestHeaders['Accept-Encoding'] = 'identity';
 
-        if (req.headers['range'] && !decodedUrl.endsWith('.m3u8')) {
+        // Rendre la détection .m3u8 plus robuste (ignorer les paramètres d'URL)
+        const urlPath = new URL(decodedUrl).pathname;
+        const endsWithM3u8 = urlPath.toLowerCase().endsWith('.m3u8');
+
+        if (req.headers['range'] && !endsWithM3u8) {
             requestHeaders['Range'] = req.headers['range'];
             console.log('[Proxy Vercel] En-tête Range transmis car ce n\'est pas un manifeste HLS.');
-        } else if (req.headers['range'] && decodedUrl.endsWith('.m3u8')) {
+        } else if (req.headers['range'] && endsWithM3u8) {
             console.warn('[Proxy Vercel] En-tête Range ignoré pour un manifeste HLS. Le client ne devrait pas le demander pour le manifeste principal.');
         }
 
@@ -69,17 +73,25 @@ module.exports = async (req, res) => {
         const contentType = response.headers.get('content-type');
         console.log(`[Proxy Vercel] Content-Type du flux original: ${contentType}`);
 
-        // Déterminer si c'est un manifeste HLS (par Content-Type)
-        const isHlsManifestContent = (contentType && (
-            contentType.includes('application/x-mpegurl') ||
-            contentType.includes('application/vnd.apple.mpegurl') ||
-            (contentType.includes('text/plain') && decodedUrl.endsWith('.m3u8')) ||
-            (contentType.includes('application/octet-stream') && decodedUrl.endsWith('.m3u8'))
-        ));
+        // --- NOUVELLE LOGIQUE DE DÉTECTION DU MANIFESTE HLS ---
+        let isHlsManifestContent = false;
+        if (contentType) {
+            const normalizedContentType = contentType.toLowerCase().trim(); // Normalisation
+            isHlsManifestContent = (
+                normalizedContentType.includes('application/x-mpegurl') ||
+                normalizedContentType.includes('application/vnd.apple.mpegurl') ||
+                (normalizedContentType.includes('text/plain') && endsWithM3u8) || // Utilise endsWithM3u8 ici
+                (normalizedContentType.includes('application/octet-stream') && endsWithM3u8) // Utilise endsWithM3u8 ici
+            );
+        }
+        // --- FIN NOUVELLE LOGIQUE DE DÉTECTION DU MANIFESTE HLS ---
+
 
         // --- NOUVEAUX LOGS DE DÉBOGAGE POUR LA CONDITION PRINCIPALE ---
-        console.log(`[Proxy Vercel] Débogage condition :`);
-        console.log(`[Proxy Vercel] - isHlsManifestContent: ${isHlsManifestContent} (contentType: ${contentType})`);
+        console.log(`[Proxy Vercel] Débogage condition (après correction) :`);
+        console.log(`[Proxy Vercel] - normalizedContentType: ${contentType ? contentType.toLowerCase().trim() : 'null'}`);
+        console.log(`[Proxy Vercel] - endsWithM3u8: ${endsWithM3u8}`);
+        console.log(`[Proxy Vercel] - isHlsManifestContent: ${isHlsManifestContent}`);
         console.log(`[Proxy Vercel] - response.status: ${response.status}`);
         console.log(`[Proxy Vercel] - Condition complète (isHlsManifestContent && response.status === 200): ${isHlsManifestContent && response.status === 200}`);
         // --- FIN NOUVEAUX LOGS DE DÉBOGAGE ---
