@@ -35,12 +35,27 @@ module.exports = async (req, res) => {
         const useHttpsAgent = decodedUrl.startsWith('https://');
 
         const requestHeaders = {};
-        requestHeaders['User-Agent'] = 'VLC/3.0.18 LibVLC/3.0.18';
+        // ANCIEN : requestHeaders['User-Agent'] = 'VLC/3.0.18 LibVLC/3.0.18';
+        // NOUVEAU : Utiliser un User-Agent de navigateur ou transmettre celui du client
+        if (req.headers['user-agent']) {
+            requestHeaders['User-Agent'] = req.headers['user-agent']; // Transmettre le User-Agent du navigateur client
+            console.log('[Proxy Vercel] User-Agent du client transmis.');
+        } else {
+            // Fallback si aucun User-Agent n'est fourni par le client (moins courant)
+            requestHeaders['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36';
+            console.log('[Proxy Vercel] User-Agent de navigateur générique utilisé.');
+        }
+
 
         if (req.headers['accept']) requestHeaders['Accept'] = req.headers['accept'];
         if (req.headers['authorization']) requestHeaders['Authorization'] = req.headers['authorization'];
         if (req.headers['accept-language']) requestHeaders['Accept-language'] = req.headers['accept-language'];
-        requestHeaders['Accept-Encoding'] = 'identity';
+        requestHeaders['Accept-Encoding'] = 'identity'; // Important pour ne pas compresser le flux vidéo
+
+        // Ajout des en-têtes Referer et Origin si présents, souvent vérifiés par les serveurs
+        if (req.headers['referer']) requestHeaders['Referer'] = req.headers['referer'];
+        if (req.headers['origin']) requestHeaders['Origin'] = req.headers['origin'];
+
 
         const urlPath = new URL(decodedUrl).pathname;
         const endsWithM3u8 = urlPath.toLowerCase().endsWith('.m3u8');
@@ -108,7 +123,7 @@ module.exports = async (req, res) => {
                 /(^|\n)([^#\n]+?\.(?:m3u8|ts|mp4|aac|mp3|key)(?:[?#][^\n]*)?\s*$)|(URI=")([^"]+?)(")|(#EXTINF:[^,\n]+,\s*)([^\n]+)/g,
                 (match, p1_line_prefix, p2_standalone_url, p3_uri_prefix, p4_uri_path, p5_uri_suffix, p6_extinf_prefix, p7_extinf_path) => {
                     let originalPath = '';
-                    let prefix = ''; // Pour conserver le préfixe de ligne s'il y en a un (e.g. \n)
+                    let prefix = '';
 
                     if (p2_standalone_url) { // Cas 1: URL autonome sur sa propre ligne
                         originalPath = p2_standalone_url.trim();
@@ -136,8 +151,8 @@ module.exports = async (req, res) => {
                     }
                     
                     if (absoluteOriginalUrl.includes('/api?url=') && absoluteOriginalUrl.includes(req.headers.host)) {
-                         console.log(`[Proxy Vercel]  - URL déjà proxyfiée détectée après résolution: ${absoluteOriginalUrl}. Non modifiée.`);
-                         return match;
+                            console.log(`[Proxy Vercel]  - URL déjà proxyfiée détectée après résolution: ${absoluteOriginalUrl}. Non modifiée.`);
+                            return match;
                     }
 
                     const proxifiedUrl = `/api?url=${encodeURIComponent(absoluteOriginalUrl)}`;
@@ -173,8 +188,10 @@ module.exports = async (req, res) => {
                 res.setHeader('Content-Type', 'audio/mpeg');
             } else if (decodedUrl.endsWith('.mp4')) {
                 res.setHeader('Content-Type', 'video/mp4');
+            } else if (decodedUrl.endsWith('.mkv')) { // Ajouté précédemment, maintenu
+                res.setHeader('Content-Type', 'video/x-matroska');
             } else if (decodedUrl.endsWith('.key')) {
-                 res.setHeader('Content-Type', 'application/octet-stream');
+                    res.setHeader('Content-Type', 'application/octet-stream');
             }
             res.status(response.status);
             response.body.pipe(res);
