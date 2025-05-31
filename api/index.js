@@ -2,18 +2,21 @@ const fetch = require('node-fetch');
 const https = require('https');
 
 const httpsAgent = new https.Agent({
-    rejectUnauthorized: false
+    rejectUnauthorized: false // Permet d'ignorer les erreurs de certificat SSL (à utiliser avec prudence en production)
 });
 
 module.exports = async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    // --- En-têtes CORS pour le client (votre site web) ---
+    res.setHeader('Access-Control-Allow-Origin', '*'); // Autorise toutes les origines (attention en production, préférez votre domaine spécifique)
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, PUT, POST, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type, Accept, Range, Authorization');
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Type, Content-Range, Range, Accept-Ranges');
+    res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type, Accept, Range, Authorization, If-None-Match, If-Modified-Since');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Type, Content-Range, Range, Accept-Ranges, ETag, Last-Modified');
+    res.setHeader('Access-Control-Max-Age', '86400'); // Cache les informations CORS pendant 24 heures
 
+    // Gère la requête OPTIONS (preflight CORS)
     if (req.method === 'OPTIONS') {
         console.log('[Proxy Vercel] Requête OPTIONS (Preflight CORS) reçue.');
-        return res.status(204).end();
+        return res.status(204).end(); // Répond avec un statut 204 No Content
     }
 
     const { url } = req.query;
@@ -35,28 +38,27 @@ module.exports = async (req, res) => {
         const useHttpsAgent = decodedUrl.startsWith('https://');
 
         const requestHeaders = {};
-        // ANCIEN : requestHeaders['User-Agent'] = 'VLC/3.0.18 LibVLC/3.0.18';
-        // NOUVEAU : Utiliser un User-Agent de navigateur ou transmettre celui du client
-        if (req.headers['user-agent']) {
-            requestHeaders['User-Agent'] = req.headers['user-agent']; // Transmettre le User-Agent du navigateur client
-            console.log('[Proxy Vercel] User-Agent du client transmis.');
-        } else {
-            // Fallback si aucun User-Agent n'est fourni par le client (moins courant)
-            requestHeaders['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36';
-            console.log('[Proxy Vercel] User-Agent de navigateur générique utilisé.');
-        }
+        // Transfert sélectif des en-têtes de la requête client au serveur original
+        const headersToForward = [
+            'User-Agent', 'Accept', 'Authorization', 'Accept-Language',
+            'Referer', 'Origin', 'Range', 'If-None-Match', 'If-Modified-Since',
+            'Content-Type', 'Content-Length', // Pour les requêtes POST/PUT si applicables
+            'Cookie' // ATTENTION: peut avoir des implications de sécurité/vie privée
+        ];
 
+        headersToForward.forEach(headerName => {
+            const clientHeaderValue = req.headers[headerName.toLowerCase()];
+            if (clientHeaderValue) {
+                requestHeaders[headerName] = clientHeaderValue;
+                console.log(`[Proxy Vercel] En-tête client transmis: ${headerName}: ${clientHeaderValue}`);
+            }
+        });
 
-        if (req.headers['accept']) requestHeaders['Accept'] = req.headers['accept'];
-        if (req.headers['authorization']) requestHeaders['Authorization'] = req.headers['authorization'];
-        if (req.headers['accept-language']) requestHeaders['Accept-language'] = req.headers['accept-language'];
+        // Assurez-vous que l'encodage d'acceptation ne compresse pas les flux binaires
         requestHeaders['Accept-Encoding'] = 'identity'; // Important pour ne pas compresser le flux vidéo
 
-        // Ajout des en-têtes Referer et Origin si présents, souvent vérifiés par les serveurs
-        if (req.headers['referer']) requestHeaders['Referer'] = req.headers['referer'];
-        if (req.headers['origin']) requestHeaders['Origin'] = req.headers['origin'];
-
-
+        // Si le client demande un range mais ce n'est pas un manifeste HLS, transmettez-le
+        // Sinon, ignorez le range pour les manifestes pour éviter des comportements inattendus
         const urlPath = new URL(decodedUrl).pathname;
         const endsWithM3u8 = urlPath.toLowerCase().endsWith('.m3u8');
 
@@ -65,24 +67,46 @@ module.exports = async (req, res) => {
             console.log('[Proxy Vercel] En-tête Range transmis car ce n\'est pas un manifeste HLS.');
         } else if (req.headers['range'] && endsWithM3u8) {
             console.warn('[Proxy Vercel] En-tête Range ignoré pour un manifeste HLS. Le client ne devrait pas le demander pour le manifeste principal.');
+            delete requestHeaders['Range']; // S'assurer qu'il n'est pas envoyé
         }
 
         console.log(`[Proxy Vercel] En-têtes envoyés au serveur original:\n${JSON.stringify(requestHeaders, null, 2)}`);
 
+        // Effectue la requête au serveur original
         const response = await fetch(decodedUrl, {
             method: req.method,
             headers: requestHeaders,
-            agent: useHttpsAgent ? httpsAgent : undefined
+            agent: useHttpsAgent ? httpsAgent : undefined,
+            // Si la requête client est POST/PUT, transmettez le corps de la requête
+            body: (req.method === 'POST' || req.method === 'PUT') ? req : undefined
         });
 
         console.log(`[Proxy Vercel] Réponse du serveur original - Statut: ${response.status} ${response.statusText}`);
         console.log(`[Proxy Vercel] Réponse du serveur original - En-têtes:\n${JSON.stringify(Object.fromEntries(response.headers), null, 2)}`);
 
-        if (!response.ok && response.status !== 206) {
+        // Gère les erreurs de la réponse du serveur original
+        if (!response.ok && response.status !== 206) { // 206 Partial Content est OK pour les requêtes Range
             const errorBody = await response.text();
             console.error(`[Proxy Vercel] Erreur lors de la récupération du flux original: ${response.status} ${response.statusText} pour URL: ${decodedUrl}. Corps de l'erreur: ${errorBody.substring(0, 500)}`);
             return res.status(response.status).send(`Failed to fetch original stream: ${response.statusText}. Details: ${errorBody.substring(0, 200)}...`);
         }
+
+        // --- Transfert des en-têtes de réponse du serveur original au client ---
+        // Sauf ceux qui sont gérés spécifiquement par le proxy (e.g., CORS headers)
+        response.headers.forEach((value, name) => {
+            // Excluez les en-têtes qui pourraient causer des conflits ou qui sont déjà gérés par le proxy
+            const excludedHeaders = [
+                'access-control-allow-origin', // Géré par le proxy
+                'access-control-allow-methods', // Géré par le proxy
+                'access-control-allow-headers', // Géré par le proxy
+                'access-control-expose-headers', // Géré par le proxy
+                'access-control-max-age', // Géré par le proxy
+                'set-cookie' // Peut être un problème de sécurité/vie privée si des cookies sont transférés
+            ];
+            if (!excludedHeaders.includes(name.toLowerCase())) {
+                res.setHeader(name, value);
+            }
+        });
 
         const contentType = response.headers.get('content-type');
         console.log(`[Proxy Vercel] Content-Type du flux original: ${contentType}`);
@@ -98,12 +122,13 @@ module.exports = async (req, res) => {
             );
         }
 
-        console.log(`[Proxy Vercel] Débogage condition (après correction) :`);
+        console.log(`[Proxy Vercel] Débogage condition :`);
         console.log(`[Proxy Vercel] - normalizedContentType: ${contentType ? contentType.toLowerCase().trim() : 'null'}`);
         console.log(`[Proxy Vercel] - endsWithM3u8: ${endsWithM3u8}`);
         console.log(`[Proxy Vercel] - isHlsManifestContent: ${isHlsManifestContent}`);
         console.log(`[Proxy Vercel] - response.status: ${response.status}`);
         console.log(`[Proxy Vercel] - Condition complète (isHlsManifestContent && response.status === 200): ${isHlsManifestContent && response.status === 200}`);
+
 
         if (isHlsManifestContent && response.status === 200) {
             console.log('[Proxy Vercel] Manifeste HLS (200 OK) détecté. Lecture du corps pour réécriture...');
@@ -114,11 +139,6 @@ module.exports = async (req, res) => {
             const originalBaseUrl = originalUrlObj.protocol + '//' + originalUrlObj.host + originalUrlObj.pathname.substring(0, originalUrlObj.pathname.lastIndexOf('/') + 1);
             console.log(`[Proxy Vercel] Base URL pour résolution relative: ${originalBaseUrl}`);
 
-            // Regex mis à jour pour mieux capturer les URLs standalone en fin de ligne
-            // Capture:
-            // 1. Une URL autonome sur sa propre ligne (groupes 1 et 2)
-            // 2. Une URL dans un attribut URI="..." (groupes 3, 4, 5)
-            // 3. Une URL après #EXTINF: (groupes 6, 7)
             modifiedM3u8Content = modifiedM3u8Content.replace(
                 /(^|\n)([^#\n]+?\.(?:m3u8|ts|mp4|aac|mp3|key)(?:[?#][^\n]*)?\s*$)|(URI=")([^"]+?)(")|(#EXTINF:[^,\n]+,\s*)([^\n]+)/g,
                 (match, p1_line_prefix, p2_standalone_url, p3_uri_prefix, p4_uri_path, p5_uri_suffix, p6_extinf_prefix, p7_extinf_path) => {
@@ -149,7 +169,7 @@ module.exports = async (req, res) => {
                         console.error(`[Proxy Vercel]  - Erreur de construction d'URL absolue: ${e.message} pour chemin: '${originalPath}' (base: ${originalBaseUrl})`);
                         absoluteOriginalUrl = originalPath;
                     }
-                    
+
                     if (absoluteOriginalUrl.includes('/api?url=') && absoluteOriginalUrl.includes(req.headers.host)) {
                             console.log(`[Proxy Vercel]  - URL déjà proxyfiée détectée après résolution: ${absoluteOriginalUrl}. Non modifiée.`);
                             return match;
@@ -158,15 +178,14 @@ module.exports = async (req, res) => {
                     const proxifiedUrl = `/api?url=${encodeURIComponent(absoluteOriginalUrl)}`;
                     console.log(`[Proxy Vercel]  - URL proxyfiée: ${proxifiedUrl}`);
 
-                    // Construction du remplacement basée sur le cas de capture
-                    if (p2_standalone_url) { // Cas 1: URL autonome
+                    if (p2_standalone_url) {
                         return `${prefix}${proxifiedUrl}`;
-                    } else if (p4_uri_path) { // Cas 2: URL dans URI="..."
+                    } else if (p4_uri_path) {
                         return `${p3_uri_prefix}${proxifiedUrl}${p5_uri_suffix}`;
-                    } else if (p7_extinf_path) { // Cas 3: URL après #EXTINF:
+                    } else if (p7_extinf_path) {
                         return `${p6_extinf_prefix}${proxifiedUrl}`;
                     }
-                    return match; // Ne devrait jamais arriver
+                    return match;
                 }
             );
 
@@ -176,9 +195,11 @@ module.exports = async (req, res) => {
             console.log('[Proxy Vercel] Manifeste réécrit (extrait):\n' + modifiedM3u8Content.substring(0, 500) + '...');
 
         } else {
+            // Pour tous les autres types de contenu (vidéo, audio, etc.)
+            // Tente de définir le Content-Type basé sur la réponse originale ou l'extension
             if (contentType) {
                 res.setHeader('Content-Type', contentType);
-            } else if (endsWithM3u8) { // Fallback pour les .m3u8 qui ne sont pas 200 OK ou avec un type non standard
+            } else if (endsWithM3u8) {
                 res.setHeader('Content-Type', 'application/x-mpegurl');
             } else if (decodedUrl.endsWith('.ts')) {
                 res.setHeader('Content-Type', 'video/mp2t');
@@ -188,14 +209,22 @@ module.exports = async (req, res) => {
                 res.setHeader('Content-Type', 'audio/mpeg');
             } else if (decodedUrl.endsWith('.mp4')) {
                 res.setHeader('Content-Type', 'video/mp4');
-            } else if (decodedUrl.endsWith('.mkv')) { // Ajouté précédemment, maintenu
+            } else if (decodedUrl.endsWith('.mkv')) {
                 res.setHeader('Content-Type', 'video/x-matroska');
             } else if (decodedUrl.endsWith('.key')) {
-                    res.setHeader('Content-Type', 'application/octet-stream');
+                res.setHeader('Content-Type', 'application/octet-stream');
             }
+
+            // Si le serveur original a répondu avec un Range (206 Partial Content), assurez-vous que le proxy le transmet
+            if (response.status === 206 && response.headers.has('content-range')) {
+                res.setHeader('Content-Range', response.headers.get('content-range'));
+            }
+
+            // Transfert le statut HTTP du serveur original
             res.status(response.status);
+            // Pipe le corps de la réponse du serveur original directement au client
             response.body.pipe(res);
-            console.log('[Proxy Vercel] Contenu non-manifeste ou non-200 OK transféré directement au client.');
+            console.log('[Proxy Vercel] Contenu non-manifeste ou non-200 OK (y compris 206) transféré directement au client.');
         }
 
     } catch (error) {
